@@ -26,10 +26,10 @@ nRxAnt = 16;
 txSpacing = [0 5 0];
 rxSpacing = [0 5 0];
 txAntCenter = [10000,0,10];
-rxAntCenter = [0,0,0];
+rxAntCenter = [0,0,10];
 
 %comms parameters
-guard = 2;%must be >= 1 (multiplier to the BW separation minimally required)
+guard = 1.25;%must be >= 1 (multiplier to the BW separation minimally required)
 sampPerSym = 20; %samples per symbol
 symRate = 1e6; %symbols per second
 sampRate = sampPerSym*symRate;
@@ -180,8 +180,15 @@ if showPlots
     end
 else
     
-    for pulseCount = 1:128%nPulse
+    %TODO Calculate the A values (twoRayResp function)
+    %TODO Make more figures?
+    
+    for pulseCount = 1:nPulse
 
+        %TODO switch over to two-Ray Model
+        %TODO debug the matched filter issue & and switch back to OFDM
+        %TODO Extract range and doppler
+        
         bits = bpskBits(Nc*Nsym*(pulseCount-1)+1:min(Nc*Nsym*pulseCount,length(bpskBits)));
         %basic signal calcs
         %signal = buildWaveform(bits,sampPerSym,symRate,Nc,Nsym,guard);
@@ -218,13 +225,17 @@ else
     figure
     surf(20*log10(abs(radarData(:,1:usedPulses))));
     
-    figure
-    surf(20*log10(abs(rangeDoppler(:,1:usedPulses))));
+    %figure
+    %surf(20*log10(abs(rangeDoppler(:,1:usedPulses))));
     
     for count = 1:size(rangeDoppler,1)
         matchedFilter(count,1:usedPulses) = fftshift(fft(rangeDoppler(count,1:usedPulses)));
     end
 
+    %TODO send the signal through a channel
+    %TODO demodulate received signal
+    %TODO Derive the TX antenna
+    
     %RECEIVED DATA
     binaryReceived = uint16((bpskBits + 1) / 2);
     txAntCalc = antSelect;
@@ -234,14 +245,73 @@ else
     imshow(RGBrecovered)
     
     figure
-    surf(20*log10(abs(matchedFilter(:,1:usedPulses))));
+    imagesc(20*log10(abs(matchedFilter(:,1:usedPulses))));
     
+    %%%EXAMPLE USAGE TAKE OUT LATER
+    
+    %define distance between radios and height of radios
+    nHeight = 10000;
+    height = linspace(9.5,10.5,nHeight);
+    Lamp1 = 10;
+    totalG = 200;
 
+    %define path values
+    directA = 1;
+    directPhi = 0;
+    reflectA = 0.98;
+    reflectPhi = pi;
+
+    %call the model to calculate response of both paths
+    [response, responseNom] = tworayResp(Lamp1,height,totalG,directPhi,...
+    reflectPhi,directA,reflectA,fc);
+    %calculate normalized gain
+    chGainNorm = abs(response)./abs(responseNom);
+    
+    %plot normalized gain vs height
+    figure
+    plot(height,20*log10(chGainNorm))
+    title('Problem 2.3: 20log(|h|/|hnom|) vs height of receiver'); 
+    xlabel('height of receiver (m)'); ylabel('normalized power gain (dB)');
+    
     %math stuff
-    %plotPSD(1000,sampPerSym,symRate,Nc,Nsym,guard)    
+    plotPSD(1000,sampPerSym,symRate,Nc,Nsym,guard)    
     
 end
     
+%calculates the distances of the direct path and the reflected path
+%inputs: ant1 height, ant2 height, dist between antennas along ground
+%outputs: direct path length, reflected path length, angle of reflection
+function [Direct,Reflect,theta] = tworayDist(Ant1,Ant2,totalG)
+    %calculate distance on ground of two components
+    LeftG = totalG*Ant1./(Ant1+Ant2);
+    RightG = totalG-LeftG;
+    %calculate theta for error checking
+    theta = atan(Ant1./LeftG);
+    %use pythagorean theorem to calc direct path length
+    Direct = sqrt((Ant1-Ant2).^2 + totalG.^2);
+    %use pythagorean theorem to calc both parts of the reflection length
+    Reflect = sqrt(Ant1.^2 + LeftG.^2) + sqrt(Ant2.^2 + RightG.^2);
+end
+
+%calculates the response of the direct path and the reflected path
+%inputs: ant1 height, ant2 height, dist between antennas along ground
+%direct path phi, reflected path phi, direct A, reflected A, center freq
+%outputs: total path response, nominal path response
+function [response,responseNom]=tworayResp(h1,h2,distG,dPhi,rPhi,dA,rA,fc)
+    %speed of light
+    c = 299792458;
+    %calculate the distance of the paths
+    [directDist,reflectDist,~] = tworayDist(h1, h2, distG);
+    %calculate time of the signal paths
+    directTau = directDist/c;
+    reflectTau = reflectDist/c;
+    %calculate the channel responses
+    directH = (dA./directDist).*exp(-1i*(2*pi*fc*directTau+dPhi));
+    reflectH = (rA./reflectDist).*exp(-1i*(2*pi*fc*reflectTau+rPhi));
+    %convert to total response and nominal response
+    response = directH+reflectH;
+    responseNom = directH;
+end
 
 
 function [outSig] = timeDelay(inSig, fracSamp)
@@ -259,6 +329,6 @@ function [outSig] = freqShift(inSig, sampRate, pulseTime, lambda, velRad, velTar
 end
 
 function [outSig] = ampScale(inSig, fc, txPower, rcs, range)
-    scale = 1e-13;
+    scale = 1e-12;
     outSig = inSig*scale;
 end
