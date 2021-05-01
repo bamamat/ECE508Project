@@ -1,4 +1,4 @@
-function [RGBrecovered, metaData] = decodeIntImg(binaryReceived, txAntCalc, nTxAnt)
+function [RGBrecovered, metaData] = decodeIntImg(binaryReceived, txAntCalc, nTxAnt, injectMeta)
     txAntCalcBin = dec2bin(txAntCalc, log2(nTxAnt));
     data = num2str(binaryReceived);
     data(isspace(data)) = '';
@@ -17,6 +17,10 @@ function [RGBrecovered, metaData] = decodeIntImg(binaryReceived, txAntCalc, nTxA
         idx = 1 + 8*(dataCount-1);
         RGBout(dataCount) = uint8(bin2dec(data(idx:idx+7)));
     end
-    RGBrecovered = reshape(RGBout, meta(1),meta(2),meta(3));
+    if exist('injectMeta','var')
+        RGBrecovered = reshape(RGBout, injectMeta(1),injectMeta(2),injectMeta(3));
+    else
+        RGBrecovered = reshape(RGBout, meta(1),meta(2),meta(3));
+    end
     metaData = meta(4:end);
 end

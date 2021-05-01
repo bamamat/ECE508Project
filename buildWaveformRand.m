@@ -5,7 +5,7 @@ Tofdm = 1/symRate;
 a = randi([0,1],Nsym,Nc)*2-1; %content of message
 freq_guard = guard;
 
-t = linspace(0,Nsym/symRate,(Nsym/symRate)*sampRate);
+t = linspace(0,Nsym/symRate,Nsym*(sampRate/symRate));
 
 %{
 sig = zeros(Nsym,Nc,length(t));
@@ -41,6 +41,7 @@ for n = 0:Nc-1
     signal = signal + tempSig;
 end
 
+signal = signal/max(abs(signal));
 
 if debug
     close all;

@@ -4,7 +4,14 @@ clear all;
 
 %plotting
 depVar = 'maxRangeDesired';
+
+%flags
 showPlots = 0;
+showPSD = 0;
+useLFM = 0;
+useRandAntenna = 0;
+runRadar = 1;
+runComms = 1;
 
 %constants
 c = 299.8E6;%speed of light
@@ -17,42 +24,51 @@ txpower=40;%dBm
 txgain=0;%dBi
 rxgain=0;%dBi
 receiverTemp=300;
-minRangeDesired = 10e3; %this is an upper limit to the length of the pulse
-maxRangeDesired = 50e3;
+minRangeDesired = 20e3; %this is an upper limit to the length of the pulse
+maxRangeDesired = 45e3;
 
 %antenna postitions
 nTxAnt = 256;
 nRxAnt = 16;
 txSpacing = [0 5 0];
 rxSpacing = [0 5 0];
-txAntCenter = [10000,0,10];
+txAntCenter = [20000,0,10];
 rxAntCenter = [0,0,10];
+
+
+%define multipath values
+directA = 1;
+directPhi = 0;
+reflectA = 0.98;
+reflectPhi = pi;
 
 %comms parameters
 guard = 1.25;%must be >= 1 (multiplier to the BW separation minimally required)
-sampPerSym = 20; %samples per symbol
-symRate = 1e6; %symbols per second
+sampPerSym = 200; %samples per symbol
+symRate = 1000e3; %symbols per second
+%calc useful variables
 sampRate = sampPerSym*symRate;
 ts = 1./sampRate;
-fs_desired = 1;
-Nmin = ceil(1./(fs_desired*ts)); %minimum length DFT for desired frequency granularity
+
+Nmin = ceil(1./(ts)); %minimum length DFT for desired frequency granularity
 Nfft = 2.^(nextpow2(Nmin)); %FFT size = the next power of 2 at least as big as Nmin
 fs=1./(Nfft.*ts);
 maxNc = sampPerSym./guard; %consider this an upper bandwidth limit
 bandWidth = ((Nfft-1)-1-Nfft./2).*fs;
 
+%place the tx and rx antennas
 txAntPos = repmat(txAntCenter,nTxAnt,1).' + txSpacing.'*((-nTxAnt+1)/2:(nTxAnt-1)/2);
 rxAntPos = repmat(rxAntCenter,nRxAnt,1).' + rxSpacing.'*((-nRxAnt+1)/2:(nRxAnt-1)/2);
 
 %radar targets
 targets(1).rcs = 0;
 targets(1).initialPos = [0,0,10];
-targets(1).velocity = [-5,0,0];
-targets(2).rcs = 5;
+targets(1).velocity = [-20,0,0];
+targets(2).rcs = -3;
 targets(2).initialPos = [-20000,0,10];
-targets(2).velocity = [10,0,0];
-targets(3).rcs = 10;
-targets(3).initialPos = [-39000,0,10];
+targets(2).velocity = [40,0,0];
+targets(3).rcs = 3;
+targets(3).initialPos = [-10000,0,10];
 targets(3).velocity = [0,0,0];
 
 %ENCODE DATA
@@ -61,13 +77,15 @@ RGB = imread('peppers.png');
 %add any metadata you want up to 251 unsigned int16s
 int16MetaData = [];
 binaryIntVect = encodeIntImg(RGB, int16MetaData);
-
+%choose an antenna based on bit data
 antSelectBits = num2str(binaryIntVect(1:log2(nTxAnt)));
 antSelectBits(isspace(antSelectBits)) = '';
 antSelect = bin2dec(antSelectBits);
+%remove the bits used in spatial modulation from the message
+%also map the binary to symbols [+1/-1]
 bpskBits = binaryIntVect(log2(nTxAnt)+1:end) * 2 - 1;
 
-%OFDM params
+%final OFDM params
 Nsym = floor(minRangeDesired*2./c*symRate); %number of symbols in a message
 Nc = min(ceil(length(bpskBits)./Nsym), maxNc);
 
@@ -81,15 +99,148 @@ dataRate = Nc.*Nsym.*PRF;
 %basic radar calcs
 minUnambigRange=pulseWidth*c./2;
 maxUnambigRange=c*(PRI-pulseWidth)./2;
-
+%round to the nearest Km
 minRange = ceil(minUnambigRange./1000)*1000;
 maxRange = floor(maxUnambigRange./1000)*1000;
-minTime = minRange*2/c;
 
 disp(['actual min range: ' num2str(minRange(1))])
 disp(['actual max range: ' num2str(maxRange(1))])
 
-if showPlots
+if ~showPlots
+    
+    %calc some useful data
+    radarDataLength = ceil(((maxRange - minRange)*2/c + pulseWidth)*sampRate);
+    minTime = minRange*2/c;
+    noisyBits = [];
+    scale = 5e-12;
+    pulses = zeros(Nsym*sampPerSym,nPulse);
+    %noise calculations
+    noisePow = boltz*bandWidth*receiverTemp;
+    radarData = noisePow*(randn(radarDataLength,nPulse)+1i*randn(radarDataLength,nPulse));
+    
+    for pulseCount = 1:nPulse
+        
+        %grab the bits for the current pulse
+        bits = bpskBits(Nc*Nsym*(pulseCount-1)+1:min(Nc*Nsym*pulseCount,length(bpskBits)));
+        %basic signal calcs
+        if useLFM
+            signal = exp(1i*pi*(10e6./pulseWidth)*(1/sampRate:1/sampRate:pulseWidth).^2);
+        else
+            signal = buildWaveform(bits,sampPerSym,symRate,Nc,Nsym,guard);
+        end
+        %log the signal for the matched filter
+        pulses(:,pulseCount) = signal;
+        
+        if runRadar
+            
+            %select the radar position as the antenna position
+            if useRandAntenna
+                radarPos = txAntPos(:,randi(nTxAnt));
+            else
+                radarPos = txAntPos(:,antSelect);
+            end
+            %for each target
+            for tarCount = 1:length(targets)
+                tar = targets(tarCount);
+                %calcualte the position based on the velocity and initial pos
+                tarPos = tar.initialPos+tar.velocity*PRI*(pulseCount-1);
+                %calculate the pulse time
+                pulseTime = PRI*(pulseCount-1);
+                %find the time after the radar starts receiving of the return
+                tarTime = (norm(tarPos-radarPos.')*2/c) - minTime;
+                %take the whole sample delay as an index
+                wholeSampDelay = floor(sampRate*tarTime);
+                %take the fractional delay for phase delay
+                fracDelay = sampRate*tarTime-floor(sampRate*tarTime);
+                %send the signal through the channel
+                %amplitude scale
+                tarReturn = ampScale(signal, scale, tar.rcs);
+                %frequency shift
+                tarReturn = freqShift(tarReturn, sampRate, pulseTime, ...
+                    lambda, [0 0 0], tar.velocity, radarPos, tarPos);
+                %phase shift
+                tarReturn = timeDelay(tarReturn, fracDelay);
+                %multipath
+                [response, ~] = tworayResp(radarPos(3),tarPos(3),norm(radarPos(1:2).'-tarPos(1:2)),directPhi,...
+                                            reflectPhi,directA,reflectA,fc);
+                tarReturn = tarReturn.*response.^2;
+                %add the return back to the received data matrix
+                radarData(wholeSampDelay+1:wholeSampDelay+length(tarReturn),pulseCount) = ...
+                    radarData(wholeSampDelay+1:wholeSampDelay+length(tarReturn),pulseCount) + tarReturn.';
+            end
+        end
+        
+        if runComms
+            % COMMS SIDE
+            noisePowComms = 0.005;
+            commsSig = signal + sqrt(noisePowComms).*randn(size(signal));
+            noisyBits(end+1:end+Nc*Nsym) = decodeWaveform(commsSig,sampPerSym,symRate,Nc,Nsym,guard);
+            %sum(noisyBits(:,pulseCount).' ~= bits)
+        end
+        
+    end
+    
+    time = linspace(0,pulseWidth, length(pulses));
+    figure
+    hold on
+    plot(time,real(pulses(:,1)))
+    plot(time,imag(pulses(:,1)))
+    hold off
+    xlabel('time (s)')
+    ylabel('amplitude')
+    title('Time Domain OFDM')
+    
+    if runRadar
+        usedPulses = 64;%2.^floor(log2(nPulse));
+        radarData = radarData(:,1:usedPulses);
+        pulses = pulses(:,1:usedPulses);
+
+        windowMatch = hamming(size(pulses,1));
+
+        validLen = ceil((maxRange - minRange)*2/c*sampRate);
+        rangeDoppler = ifft(fft(radarData,[],1).*conj(fft(pulses.*repmat(windowMatch,1,size(pulses,2)),size(radarData,1),1)));
+
+        windowDoppler = hamming(usedPulses);
+        rangeDoppler = rangeDoppler(1:validLen,1:usedPulses);
+
+        matchedFilter = fftshift(fft(windowDoppler.'.*rangeDoppler(:,1:usedPulses),[],2),2);
+        freqs = linspace(-PRF/4,PRF/4, usedPulses);
+        ranges = linspace(minRange, maxRange, validLen);
+        
+        figure
+        imagesc(freqs*lambda/2,ranges/1e3,300+20*log10(abs(matchedFilter(:,1:usedPulses))));
+        xlabel('Speed Towards Radar (m/s)')
+        ylabel('Target Range (km)')
+        title('Range Doppler Amplitudes')
+
+        figure
+        surf(freqs*lambda/2,ranges/1e3,300+20*log10(abs(matchedFilter(:,1:usedPulses))));
+        xlabel('Speed Towards Radar (m/s)')
+        ylabel('Target Range (km)')
+        zlabel('Amplitude (dB)')
+        title('Range Doppler')
+    end
+    
+    %RECEIVED DATA
+    if runComms
+        noisyBits = noisyBits(1:length(bpskBits));
+        errors = sum(noisyBits ~= bpskBits);
+        binaryReceived = uint16((noisyBits + 1) / 2);
+        disp(['error rate: ', num2str(errors/length(bpskBits))])
+        disp(['SNR: ', num2str(10*log10(mean(abs(pulses(:,1).^2))/noisePowComms))])
+        txAntCalc = antSelect;
+
+        RGBrecovered = decodeIntImg(binaryReceived, txAntCalc, nTxAnt,size(RGB));
+        figure
+        imshow(RGBrecovered)
+    end
+    
+    %Show OFDM Spectrum
+    if showPSD
+        plotPSD(1000,sampPerSym,symRate,Nc,Nsym,guard)
+    end
+    
+else
     if strcmp(depVar,'symRate')
         figure
         plot(symRate/1e3,dataRate/80e6)
@@ -178,104 +329,6 @@ if showPlots
         ylabel('Number of Pulses')
         title('Number of Pulses vs Max Range Desired')
     end
-else
-    
-    %TODO Calculate the A values (twoRayResp function)
-    %TODO Make more figures?
-    
-    for pulseCount = 1:nPulse
-
-        %TODO switch over to two-Ray Model
-        %TODO debug the matched filter issue & and switch back to OFDM
-        %TODO Extract range and doppler
-        
-        bits = bpskBits(Nc*Nsym*(pulseCount-1)+1:min(Nc*Nsym*pulseCount,length(bpskBits)));
-        %basic signal calcs
-        %signal = buildWaveform(bits,sampPerSym,symRate,Nc,Nsym,guard);
-        signal = exp(1i*pi*(1e6./pulseWidth)*(1/sampRate:1/sampRate:pulseWidth).^2);
-        pulses(:,pulseCount) = signal;
-        radarDataLength = floor(((maxRange - minRange)*2/c + pulseWidth)*sampRate);
-
-        %noise calculations
-        noisePow = boltz*bandWidth*receiverTemp;
-        radarData(:,pulseCount) = noisePow*(randn(1,radarDataLength)+1i*randn(1,radarDataLength));
-        radarPos = txAntPos(:,antSelect);
-
-        for tarCount = 1:length(targets)
-            tar = targets(tarCount);
-            tarPos = tar.initialPos+tar.velocity*PRI*(pulseCount-1);
-            pulseTime = PRI*(pulseCount-1);
-            tarTime = (norm(tarPos-radarPos.')*2/c) - minTime;
-            wholeSampDelay = floor(sampRate*tarTime);
-            fracDealy = sampRate*tarTime-floor(sampRate*tarTime);
-            tarReturn = ampScale(signal);
-            tarReturn = freqShift(tarReturn, sampRate, pulseTime, lambda, [0 0 0], tar.velocity, radarPos, tarPos);
-            tarReturn = timeDelay(tarReturn,fracDealy);
-            radarData(wholeSampDelay+1:wholeSampDelay+length(tarReturn),pulseCount) = ...
-                radarData(wholeSampDelay+1:wholeSampDelay+length(tarReturn),pulseCount) + tarReturn.';
-        end
-
-        rangeDoppler(:,pulseCount) = conv(radarData(:,pulseCount),conj(pulses(:,pulseCount)));
-        
-    end
-    
-    usedPulses = 128;
-    rangeDoppler = rangeDoppler(:,1:usedPulses);
-    
-    figure
-    surf(20*log10(abs(radarData(:,1:usedPulses))));
-    
-    %figure
-    %surf(20*log10(abs(rangeDoppler(:,1:usedPulses))));
-    
-    for count = 1:size(rangeDoppler,1)
-        matchedFilter(count,1:usedPulses) = fftshift(fft(rangeDoppler(count,1:usedPulses)));
-    end
-
-    %TODO send the signal through a channel
-    %TODO demodulate received signal
-    %TODO Derive the TX antenna
-    
-    %RECEIVED DATA
-    binaryReceived = uint16((bpskBits + 1) / 2);
-    txAntCalc = antSelect;
-
-    RGBrecovered = decodeIntImg(binaryReceived, txAntCalc, nTxAnt);
-    figure
-    imshow(RGBrecovered)
-    
-    figure
-    imagesc(20*log10(abs(matchedFilter(:,1:usedPulses))));
-    
-    %%%EXAMPLE USAGE TAKE OUT LATER
-    
-    %define distance between radios and height of radios
-    nHeight = 10000;
-    height = linspace(9.5,10.5,nHeight);
-    Lamp1 = 10;
-    totalG = 200;
-
-    %define path values
-    directA = 1;
-    directPhi = 0;
-    reflectA = 0.98;
-    reflectPhi = pi;
-
-    %call the model to calculate response of both paths
-    [response, responseNom] = tworayResp(Lamp1,height,totalG,directPhi,...
-    reflectPhi,directA,reflectA,fc);
-    %calculate normalized gain
-    chGainNorm = abs(response)./abs(responseNom);
-    
-    %plot normalized gain vs height
-    figure
-    plot(height,20*log10(chGainNorm))
-    title('Problem 2.3: 20log(|h|/|hnom|) vs height of receiver'); 
-    xlabel('height of receiver (m)'); ylabel('normalized power gain (dB)');
-    
-    %math stuff
-    plotPSD(1000,sampPerSym,symRate,Nc,Nsym,guard)    
-    
 end
     
 %calculates the distances of the direct path and the reflected path
@@ -306,8 +359,8 @@ function [response,responseNom]=tworayResp(h1,h2,distG,dPhi,rPhi,dA,rA,fc)
     directTau = directDist/c;
     reflectTau = reflectDist/c;
     %calculate the channel responses
-    directH = (dA./directDist).*exp(-1i*(2*pi*fc*directTau+dPhi));
-    reflectH = (rA./reflectDist).*exp(-1i*(2*pi*fc*reflectTau+rPhi));
+    directH = (dA).*exp(-1i*(2*pi*fc*directTau+dPhi));
+    reflectH = (rA).*exp(-1i*(2*pi*fc*reflectTau+rPhi));
     %convert to total response and nominal response
     response = directH+reflectH;
     responseNom = directH;
@@ -322,13 +375,16 @@ function [outSig] = timeDelay(inSig, fracSamp)
 end
 
 function [outSig] = freqShift(inSig, sampRate, pulseTime, lambda, velRad, velTar, posRad, posTar)
+    %find radial speed
     speed = dot((posTar-posRad.'),(velTar-velRad))/norm((posTar-posRad.'));
+    %calculate the shift
     shift = -2*(speed/lambda);
+    %generate the time vector for the doppler shift
     t = (0:1/sampRate:(length(inSig)-1)/sampRate) + pulseTime;
+    %apply the doppler shift
     outSig = inSig .* exp(1i*2*pi*shift*t);
 end
 
-function [outSig] = ampScale(inSig, fc, txPower, rcs, range)
-    scale = 1e-12;
-    outSig = inSig*scale;
+function [outSig] = ampScale(inSig, scale, rcs)
+    outSig = inSig*scale*10^(rcs/10);
 end

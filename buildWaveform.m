@@ -9,7 +9,7 @@ end
 a = reshape(bits,Nsym,Nc);
 freq_guard = guard;
 
-t = linspace(0,Nsym/symRate,(Nsym/symRate)*sampRate);
+t = linspace(0,Nsym/symRate,Nsym*(sampRate/symRate));
 
 %{
 sig = zeros(Nsym,Nc,length(t));
@@ -44,6 +44,11 @@ for n = 0:Nc-1
     tempSig = repelem(a(:,n+1),sampPerSym,1).'.*exp(1i*2*pi*fn*t);
     signal = signal + tempSig;
 end
+
+signal = signal/max(abs(signal));
+
+%figure
+%plot(bits(1:Nsym))
 
 
 if debug
